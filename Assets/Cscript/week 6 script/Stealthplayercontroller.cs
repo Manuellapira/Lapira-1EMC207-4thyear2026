@@ -1,16 +1,17 @@
 using UnityEngine;
 using UnityEngine.AI;
 
-// Simple right-click-to-move player. No stealth button and no sound
-// anymore - the enemy only reacts to what it can SEE, so hiding behind
-// walls is how you stay safe.
+// Right-click to move. Nothing happens while the player is dead.
 //
 // Keep moveSpeed higher than the enemy's Chase Speed (3.5), so you can
-// outrun it.
+// outrun a chase.
 [RequireComponent(typeof(NavMeshAgent))]
 public class StealthPlayerController : MonoBehaviour
 {
     [SerializeField] private float moveSpeed = 5f;
+
+    [Tooltip("Which layers your right-click can hit. Set this to Ground ONLY, so roofs, walls and flying enemies never block your clicks.")]
+    [SerializeField] private LayerMask clickMask = ~0;
 
     private NavMeshAgent agent;
 
@@ -22,6 +23,12 @@ public class StealthPlayerController : MonoBehaviour
 
     private void Update()
     {
+        // Dead or finished? No walking.
+        if (GameManager.Instance != null && !GameManager.Instance.IsPlaying)
+        {
+            return;
+        }
+
         // Right mouse button
         if (!Input.GetMouseButtonDown(1))
         {
@@ -31,7 +38,7 @@ public class StealthPlayerController : MonoBehaviour
         Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
         RaycastHit hit;
 
-        if (Physics.Raycast(ray, out hit))
+        if (Physics.Raycast(ray, out hit, Mathf.Infinity, clickMask))
         {
             agent.SetDestination(hit.point);
         }

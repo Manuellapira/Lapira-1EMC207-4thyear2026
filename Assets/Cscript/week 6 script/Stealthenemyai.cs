@@ -11,17 +11,20 @@ public enum EnemyState
 }
 
 // Metal Gear style enemy. It only reacts to what it SEES.
+// One script for BOTH ground enemies and flying enemies. For a flying
+// enemy, just tick "Is Flying" in the Inspector.
 //
 // Patrol      -> Alert       : it sees the player.
 // Alert       -> Chase       : it keeps seeing the player for alertTime
 //                              seconds. It stands still and stares.
 // Alert       -> Investigate : the player slips out of sight.
 // Chase       -> Investigate : it loses the player.
-// Investigate -> Chase       : it sees the player again (right away,
-//                              because it is already on guard).
-// Investigate -> Patrol      : it reached the last spot it saw the
-//                              player, searched for searchTime seconds,
-//                              and found nothing.
+// Investigate -> Chase       : it sees the player again (right away).
+// Investigate -> Patrol      : it searched the last known spot for
+//                              searchTime seconds and found nothing.
+//
+// DEATH: if the enemy is CHASING and gets within catchDistance of the
+// player, the player dies.
 [RequireComponent(typeof(NavMeshAgent))]
 public class StealthEnemyAI : MonoBehaviour
 {
@@ -39,6 +42,7 @@ public class StealthEnemyAI : MonoBehaviour
 
     [Header("Vision")]
     [SerializeField] private float viewDistance = 10f;
+    [Tooltip("Flying enemies: use 360 so they see all around and below them.")]
     [Range(10f, 360f)]
     [SerializeField] private float viewAngle = 90f;
     [Tooltip("Eye height above this object's pivot. Capsule: 0.5. Model with the pivot at its feet: about 1.6.")]
@@ -61,6 +65,17 @@ public class StealthEnemyAI : MonoBehaviour
     [Header("Chase")]
     [SerializeField] private float chaseSpeed = 3.5f;
 
+    [Header("Catching")]
+    [Tooltip("If the enemy is CHASING and gets this close to the player, the player dies.")]
+    [SerializeField] private float catchDistance = 1.5f;
+
+    [Header("Flying (tick Is Flying for flying enemies)")]
+    [SerializeField] private bool isFlying = false;
+    [SerializeField] private float flyHeight = 8f;
+    [SerializeField] private float heightSmoothSpeed = 2f;
+    [SerializeField] private float bobAmplitude = 0.3f;
+    [SerializeField] private float bobFrequency = 1.5f;
+
     [Header("Optional")]
     [Tooltip("Drag the enemy here to see its state as a colour: green = patrol, yellow = alert, orange = investigate, red = chase.")]
     [SerializeField] private Renderer bodyRenderer;
@@ -72,19 +87,36 @@ public class StealthEnemyAI : MonoBehaviour
     private bool hasArrivedAtSearchSpot;
     private float alertTimer;
     private float searchTimer;
+    private float currentFlyOffset;
 
     private void Awake()
     {
         agent = GetComponent<NavMeshAgent>();
+
+        if (isFlying)
+        {
+            // It is in the air, so it never bumps into things on the ground.
+            agent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance;
+        }
     }
 
     private void Start()
     {
+        currentFlyOffset = agent.baseOffset;
+
+        if (GameManager.Instance != null)
+        {
+            GameManager.Instance.RegisterEnemy(this);
+        }
+
         ChangeState(EnemyState.Patrol);
     }
 
     private void Update()
     {
+        UpdateFlyingHeight();
+        CheckCatchPlayer();
+
         bool canSeePlayer = CanSeePlayer();
 
         if (canSeePlayer)
@@ -110,6 +142,15 @@ public class StealthEnemyAI : MonoBehaviour
                 // It shouldn't reach this, but just in case.
                 break;
         }
+    }
+
+    // ---------- Called by the GameManager ----------
+
+    // After the player respawns, every enemy calms down and walks its
+    // patrol again.
+    public void ResetToPatrol()
+    {
+        ChangeState(EnemyState.Patrol);
     }
 
     // ---------- States ----------
@@ -235,6 +276,20 @@ public class StealthEnemyAI : MonoBehaviour
 
     // ---------- Helpers ----------
 
+    // Flying enemies slowly rise to flyHeight, then float with a small bob.
+    // Ground enemies skip this completely.
+    private void UpdateFlyingHeight()
+    {
+        if (!isFlying)
+        {
+            return;
+        }
+
+        currentFlyOffset = Mathf.Lerp(currentFlyOffset, flyHeight, Time.deltaTime * heightSmoothSpeed);
+        float bob = Mathf.Sin(Time.time * bobFrequency) * bobAmplitude;
+        agent.baseOffset = currentFlyOffset + bob;
+    }
+
     private void GoToPatrolPoint(int index)
     {
         if (patrolPath == null || patrolPath.Count == 0)
@@ -245,12 +300,43 @@ public class StealthEnemyAI : MonoBehaviour
         agent.SetDestination(patrolPath.GetPoint(index));
     }
 
+    // The player only dies if this enemy is CHASING and reaches them.
+    // A flying enemy that just flies over a roof does NOT kill a player
+    // hiding underneath, because it is not chasing.
+    private void CheckCatchPlayer()
+    {
+        if (CurrentState != EnemyState.Chase)
+        {
+            return;
+        }
+
+        if (player == null || GameManager.Instance == null)
+        {
+            return;
+        }
+
+        Vector3 offset = player.position - transform.position;
+        offset.y = 0f;
+
+        if (offset.magnitude <= catchDistance)
+        {
+            GameManager.Instance.PlayerDied();
+        }
+    }
+
     // True only if the player is close enough, inside the vision cone,
-    // AND nothing (like a wall) is blocking the line between them.
-    // That last part is what makes hiding work.
+    // AND nothing is blocking the line between them.
+    // That last part is what makes hiding work: a wall blocks a ground
+    // enemy, and a ROOF blocks a flying enemy looking down.
     private bool CanSeePlayer()
     {
         if (player == null)
+        {
+            return false;
+        }
+
+        // A dead player cannot be seen.
+        if (GameManager.Instance != null && !GameManager.Instance.IsPlaying)
         {
             return false;
         }
@@ -322,10 +408,16 @@ public class StealthEnemyAI : MonoBehaviour
         }
     }
 
-    // Select the enemy in the Scene view to see its vision cone.
+    // Select the enemy in the Scene view to see what it can see.
     private void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.yellow;
+
+        if (viewAngle >= 359f)
+        {
+            Gizmos.DrawWireSphere(transform.position, viewDistance);
+            return;
+        }
 
         Vector3 leftEdge = Quaternion.Euler(0f, -viewAngle * 0.5f, 0f) * transform.forward * viewDistance;
         Vector3 rightEdge = Quaternion.Euler(0f, viewAngle * 0.5f, 0f) * transform.forward * viewDistance;
